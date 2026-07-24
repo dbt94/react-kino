@@ -8,6 +8,11 @@ vi.mock("../scene", () => ({
   useSceneContext: vi.fn(() => {
     throw new Error("Not inside Scene");
   }),
+  useSceneContextOptional: vi.fn(() => null),
+  useSceneProgressValue: vi.fn(() => {
+    throw new Error("Not inside Scene");
+  }),
+  useSceneProgressValueOptional: vi.fn(() => null),
 }));
 
 afterEach(() => {

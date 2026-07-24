@@ -20,9 +20,11 @@ Core scroll engine under 1 KB gzipped.
 ## Why react-kino
 
 - **Tiny** -- the core scroll engine is under 1 KB gzipped. GSAP ScrollTrigger alone is 33 KB.
-- **Declarative** -- compose `<Scene>`, `<Reveal>`, `<ScrollTransform>`, `<Parallax>`, `<Counter>`, `<StickyHeader>`, `<Marquee>`, and `<TextReveal>` like regular React components. No imperative timelines.
+- **Declarative** -- compose `<Scene>`, `<Reveal>`, `<ScrollTransform>`, `<Parallax>`, `<Counter>`, `<CompareSlider>`, `<HorizontalScroll>`, `<VideoScroll>`, `<Progress>`, `<StickyHeader>`, `<Marquee>`, and `<TextReveal>` like regular React components. No imperative timelines.
 - **Lightweight runtime** -- `react-kino` uses a tiny internal engine package (`@react-kino/core`) plus React peers.
 - **SSR-safe** -- every component renders children on the server and animates on the client.
+- **Typed** -- every component ships its prop types (`SceneProps`, `RevealProps`, ...) plus a typed `EasingName` union for autocomplete on `easing` props.
+- **Resize-safe** -- pinned scenes recompute on viewport resize and mobile browser URL-bar show/hide, so progress never desyncs.
 
 ## Installation
 
@@ -189,6 +191,8 @@ import { Scene } from "react-kino";
 | `style` | `CSSProperties` | -- | Inline styles for the sticky inner container |
 
 **Context:** `<Scene>` provides a `SceneContext` that child components (`<Reveal>`, `<Counter>`, `<CompareSlider>`) automatically read from. You do not need to pass progress manually.
+
+**Resize handling:** `<Scene>` recomputes its duration and progress whenever the viewport resizes -- including a mobile browser's URL bar showing or hiding -- so pinned content never desyncs. Resize bursts are debounced and coalesced into a single `requestAnimationFrame`-scheduled update.
 
 <p align="center">
   <img src="apps/docs/public/demos/scene.gif" alt="Scene component demo" width="80%" />
@@ -377,7 +381,10 @@ import { CompareSlider } from "react-kino";
 | `scrollDriven` | `boolean` | `false` | If `true`, slider position follows scroll progress instead of drag |
 | `progress` | `number` | -- | Progress override (0-1). When `scrollDriven`, defaults to parent `<Scene>` context |
 | `initialPosition` | `number` | `0.5` | Initial slider position (0-1) in drag mode |
+| `ariaLabel` | `string` | `"Comparison slider"` | Accessible label for the drag handle (`role="slider"`) |
 | `className` | `string` | -- | CSS class for the container |
+
+The handle is a fully accessible slider: it exposes `role="slider"` with `aria-valuenow`/`aria-valuemin`/`aria-valuemax`, is keyboard-operable (`ArrowLeft`/`ArrowRight` nudge by 5%, `Home`/`End` jump to the ends), and is excluded from the tab order when `scrollDriven` is set (since its position isn't user-adjustable in that mode).
 
 <p align="center">
   <img src="apps/docs/public/demos/compare-slider.gif" alt="CompareSlider before/after reveal demo" width="80%" />
@@ -427,7 +434,7 @@ import { HorizontalScroll, Panel } from "react-kino";
 | `className` | `string` | -- | CSS class |
 | `style` | `CSSProperties` | -- | Inline styles (merged with default `100vw x 100vh` sizing) |
 
-The spacer height is automatically set to `childCount * 100vh`, giving each panel a full viewport of scroll distance.
+The spacer height is automatically set to `childCount * 100vh`, giving each panel a full viewport of scroll distance. Recomputes on window resize (incl. mobile URL-bar show/hide) so panel offsets stay correct. `prefers-reduced-motion`: panels render without the scroll-linked horizontal transform instead of scroll-jacking the user sideways.
 
 ---
 
@@ -488,7 +495,7 @@ import { VideoScroll } from "react-kino";
 | `children` | `ReactNode \| (progress: number) => ReactNode` | -- | Overlay content rendered on top of the video |
 | `className` | `string` | -- | CSS class for the outer spacer |
 
-The video is `muted`, `playsInline`, and never autoplays. `currentTime` is set directly from scroll progress. `prefers-reduced-motion`: video stays on the poster frame.
+The video is `muted`, `playsInline`, and never autoplays. `currentTime` is set directly from scroll progress, and re-synced as soon as the video's `loadedmetadata` event fires -- so slow-loading videos no longer show a stale first frame. `prefers-reduced-motion`: video stays on the poster frame.
 
 ---
 
@@ -630,13 +637,56 @@ function CustomScene() {
 | `spacerRef` | `RefObject<HTMLElement \| null>` | Ref to the spacer/container element |
 | `durationPx` | `number` | Total scroll distance in pixels |
 
-**Returns:** `number` -- progress from `0` to `1`.
+**Returns:** `number` -- progress from `0` to `1`. **Re-renders** each frame; for hot animations use the value hooks below.
+
+---
+
+### `useSceneProgressValue()` / `useScrollProgressValue()` -- the fast path
+
+Return a stable `ProgressValue` (a Motion-style motion value) that you subscribe to imperatively and write to the DOM directly — **no re-render per scroll frame**. `useSceneProgressValue()` reads the enclosing `<Scene>`; `useScrollProgressValue()` tracks whole-page scroll. This is exactly what the built-in components use internally.
+
+```tsx
+import { useRef, useEffect } from "react";
+import { useSceneProgressValue } from "react-kino";
+
+function FastFade() {
+  const ref = useRef<HTMLDivElement>(null);
+  const progress = useSceneProgressValue();
+  useEffect(() => {
+    const apply = (p: number) => (ref.current!.style.opacity = String(p));
+    apply(progress.get());
+    return progress.on(apply); // direct DOM write, zero re-renders
+  }, [progress]);
+  return <div ref={ref}>I fade in without re-rendering</div>;
+}
+```
+
+**Returns:** `ProgressValue` (`get()` / `set(n)` / `on(fn) => unsubscribe`). `useSceneProgressValue()` throws outside a `<Scene>`.
+
+---
+
+### `useElementProgress(ref, { offset })` / `useElementProgressValue(ref, { offset })`
+
+Element-relative scroll progress **without pinning**. Maps an element's viewport entry/exit to `0`→`1` using Motion-style `offset` pairs (e.g. `["start end", "end start"]`), gated behind an `IntersectionObserver`. `useElementProgress` returns a re-rendering number; `useElementProgressValue` returns a `ProgressValue`.
+
+```tsx
+import { useRef } from "react";
+import { useElementProgress } from "react-kino";
+
+function FadeOnView() {
+  const ref = useRef<HTMLDivElement>(null);
+  const progress = useElementProgress(ref); // no <Scene> required
+  return <div ref={ref} style={{ opacity: progress }}>Tied to my own position</div>;
+}
+```
+
+Offset edges accept `"start"` / `"center"` / `"end"`, a fraction (`0`–`1`), or a percentage string. Default: `["start end", "end start"]`.
 
 ---
 
 ### `useSceneContext()`
 
-Access the progress value from a parent `<Scene>`. Useful for building custom components that react to scene progress.
+Access the numeric progress value from a parent `<Scene>`. Useful for building custom components that react to scene progress. **Re-renders** the calling component each frame (the backward-compatible path); prefer `useSceneProgressValue()` for hot animations.
 
 ```tsx
 import { useSceneContext } from "react-kino";
@@ -648,6 +698,24 @@ function CustomFadeIn() {
 ```
 
 **Returns:** `{ progress: number }` -- throws if used outside a `<Scene>`.
+
+---
+
+### `useSceneContextOptional()`
+
+Non-throwing variant of `useSceneContext()`. Returns `null` instead of throwing when used outside a `<Scene>`, so components can branch on the result (e.g. render a fallback, or work both inside and outside a scene) without wrapping the hook call in try/catch.
+
+```tsx
+import { useSceneContextOptional } from "react-kino";
+
+function OptionalFadeIn() {
+  const scene = useSceneContextOptional();
+  const progress = scene?.progress ?? 1;
+  return <div style={{ opacity: progress }}>Fades in if inside a Scene</div>;
+}
+```
+
+**Returns:** `{ progress: number } | null`.
 
 ---
 
@@ -668,6 +736,14 @@ function AdvancedComponent() {
 
 ---
 
+### `useKinoOptional()`
+
+Non-throwing variant of `useKino()`. Returns `null` instead of throwing when used outside a `<Kino>` provider.
+
+**Returns:** `{ tracker: ScrollTracker } | null`.
+
+---
+
 ### `useIsClient()`
 
 SSR guard. Returns `false` on the server and during hydration, `true` after the component mounts on the client.
@@ -683,6 +759,34 @@ function SafeComponent() {
 ```
 
 **Returns:** `boolean`
+
+---
+
+## TypeScript
+
+react-kino is written in TypeScript and ships full `.d.ts` declarations plus source maps.
+
+**Prop types:** every component's props are exported, so you can type wrapper components, forward refs, or build your own presets without re-declaring shapes:
+
+```tsx
+import type { SceneProps, RevealProps, CompareSliderProps } from "react-kino";
+```
+
+Exported prop types: `SceneProps`, `RevealProps`, `CounterProps`, `ParallaxProps`, `CompareSliderProps`, `ProgressProps`, `VideoScrollProps`, `TextRevealProps`, `HorizontalScrollProps`, `PanelProps`, `MarqueeProps`, `StickyHeaderProps`, `ScrollTransformProps`, and the `TransformState` shape used by `ScrollTransform`.
+
+**Easing types:** the built-in easing preset names are typed and re-exported from `@react-kino/core`, so `easing="ease-out-cubic"` autocompletes and rejects typos:
+
+```tsx
+import type { EasingName, EasingFn, ProgressData } from "react-kino";
+
+// EasingName = "linear" | "ease-in" | "ease-out" | "ease-in-out"
+//            | "ease-in-cubic" | "ease-out-cubic" | "ease-in-out-cubic"
+//            | "ease-in-quart" | "ease-out-quart" | "ease-in-out-quart"
+
+const myEasing: EasingName = "ease-out-cubic";
+```
+
+`EasingFn` (`(t: number) => number`) and `ProgressData` (the shape emitted by the scroll engine) are also re-exported for advanced use with `@react-kino/core` directly.
 
 ---
 
@@ -915,19 +1019,37 @@ react-kino respects the `prefers-reduced-motion` media query:
 - **`<Counter>`** -- displays the final `to` value immediately once progress reaches `at`
 - **`<Marquee>`** -- renders items in a static flex layout instead of animating
 - **`<StickyHeader>`** -- transitions are disabled, background changes immediately
+- **`<VideoScroll>`** -- stays on the poster frame instead of scrubbing
+- **`<TextReveal>`** -- all text renders immediately at full opacity
+- **`<HorizontalScroll>`** -- panels render without the scroll-linked horizontal transform, instead of scroll-jacking sideways
 
 No additional configuration is required. This behavior is automatic.
+
+**Keyboard & screen reader support:** `<CompareSlider>` exposes its drag handle as a fully accessible slider -- `role="slider"` with `aria-valuenow`/`aria-valuemin`/`aria-valuemax`, keyboard-operable via `ArrowLeft`/`ArrowRight` (nudge by 5%) and `Home`/`End` (jump to the ends), labeled via the `ariaLabel` prop, and excluded from the tab order in `scrollDriven` mode (where its position isn't user-adjustable).
 
 ---
 
 ## Performance
 
+### The ref-based engine
+
+react-kino writes to the DOM **imperatively** on the scroll hot path — the same approach as Motion's `MotionValue`s and GSAP's ScrollTrigger — instead of calling `setState` every frame.
+
+- **`ProgressValue`, not `setState`** -- `<Scene>` exposes progress as a stable `ProgressValue` from `@react-kino/core`. The built-in components (`<Parallax>`, `<ScrollTransform>`, `<Reveal>`, `<HorizontalScroll>`, `<Counter>`, `<TextReveal>`, `<VideoScroll>`) subscribe and write `transform` / `opacity` / `textContent` directly to their own elements. Scrolling a scene triggers **zero React re-renders** for them.
+- **Backward-compatible dual path** -- the numeric `useSceneContext()` and render-prop (`<Scene>{(p) => …}</Scene>`) APIs are unchanged; they just opt back into re-rendering. Use `useSceneProgressValue()` / `useScrollProgressValue()` to get the fast path in your own components.
+- **IntersectionObserver gating** -- scenes only do per-frame work while near the viewport (generous `100%` `rootMargin`); off-screen scenes cost nothing, and progress snaps to its exact value on fast re-entry rather than a stale one.
+- **Element-relative offsets** -- `useElementProgress` and `<Reveal trigger="visibility">` tie animation to an element's own position without pinning, via pure offset math in the core.
+
+### Under the hood
+
 - **Passive scroll listeners** -- all scroll event listeners use `{ passive: true }`
 - **requestAnimationFrame batching** -- scroll updates are batched via RAF to avoid layout thrashing
+- **Debounced resize handling** -- window resize events (including mobile URL-bar show/hide) are debounced and coalesced into a single rAF-scheduled recompute, so `<Scene>`, `<VideoScroll>`, and `<HorizontalScroll>` never desync
 - **GPU-accelerated transforms** -- parallax and reveal animations use `transform` and `opacity` (composite-only properties)
 - **`will-change` hints** -- applied to animating elements for browser optimization
 - **Sub-1 KB core** -- `@react-kino/core` contains all scroll math with zero dependencies
 - **Tree-shakeable** -- import only the components you use; unused code is eliminated at build time
+- **Debuggable** -- source maps are shipped for both `react-kino` and `@react-kino/core`
 
 ---
 
